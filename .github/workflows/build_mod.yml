@@ -87,7 +87,7 @@ jobs:
               os.rename("raw_download.bin", "target.apk")
           '
 
-      - name: Run Il2CppDumper & Generate Offsets Header
+      - name: Run Il2CppDumper (--roll-forward Major) & Inspect Real Signatures
         run: |
           mkdir -p dump_in dump_out
           python3 -c '
@@ -103,7 +103,7 @@ jobs:
           '
           if [ -f "dump_in/libil2cpp.so" ] && [ -f "dump_in/global-metadata.dat" ]; then
             if [ -f "il2cppdumper/Il2CppDumper.dll" ]; then
-              dotnet il2cppdumper/Il2CppDumper.dll dump_in/libil2cpp.so dump_in/global-metadata.dat dump_out/ < /dev/null || true
+              DOTNET_ROLL_FORWARD=Major dotnet il2cppdumper/Il2CppDumper.dll dump_in/libil2cpp.so dump_in/global-metadata.dat dump_out/ < /dev/null || true
             fi
           fi
           python3 analyze_dump.py
@@ -118,6 +118,7 @@ jobs:
           path: |
             TempleRun_FreeCam_Mod.apk
             generated_offsets.h
+            dump_out/dump.cs
           retention-days: 7
 
       - name: Upload Modded APK to Cloud Hosts
@@ -129,16 +130,16 @@ jobs:
             local service="$1"
             local url="$2"
             if [[ -n "$url" && "$url" =~ ^https?:// ]]; then
-              echo "✅ $service: $url"
+              echo "✅ DOWNLOAD_LINK [$service]: $url"
               echo "- **$service:** [$url]($url)" >> $GITHUB_STEP_SUMMARY
             fi
           }
 
           URL_LITTER=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "time=72h" -F "fileToUpload=@$FINAL_APK" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null || true)
-          log_upload "Litterbox (Direct)" "$URL_LITTER"
+          log_upload "Litterbox" "$URL_LITTER"
 
           URL_CATBOX=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "fileToUpload=@$FINAL_APK" https://catbox.moe/user/api.php 2>/dev/null || true)
-          log_upload "Catbox.moe" "$URL_CATBOX"
+          log_upload "Catbox" "$URL_CATBOX"
 
           URL_TEMP=$(curl -s -A "Mozilla/5.0" -F "file=@$FINAL_APK" https://temp.sh/upload 2>/dev/null || true)
           log_upload "Temp.sh" "$URL_TEMP"
