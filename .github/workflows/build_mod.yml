@@ -14,15 +14,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python & Tools
+      - name: Download Modding & Recon Tools Safely
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          pip install requests cloudscraper
-          curl -sL https://github.com/REAndroid/APKEditor/releases/download/V1.4.1/APKEditor-1.4.1.jar -o APKEditor.jar
-          curl -sL https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar -o baksmali.jar
-          curl -sL https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar -o smali.jar
-          curl -sL https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-linux-v6.7.46.zip -o il2cppdumper.zip
-          unzip -q il2cppdumper.zip -d il2cppdumper
-          chmod +x il2cppdumper/Il2CppDumper
+          python3 -c '
+          import os, requests, zipfile
+
+          headers = {"Authorization": f"token {os.environ.get("GH_TOKEN", "")}"}
+
+          def dl(url, out):
+              print(f"Downloading {out} from {url}...")
+              r = requests.get(url, allow_redirects=True, timeout=60)
+              r.raise_for_status()
+              with open(out, "wb") as f:
+                  f.write(r.content)
+
+          dl("https://github.com/REAndroid/APKEditor/releases/download/V1.4.1/APKEditor-1.4.1.jar", "APKEditor.jar")
+          dl("https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar", "baksmali.jar")
+          dl("https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar", "smali.jar")
+
+          try:
+              rel = requests.get("https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest", headers=headers, timeout=30).json()
+              for a in rel.get("assets", []):
+                  if a["name"].endswith(".zip") and ("net6" in a["name"] or "v" in a["name"]):
+                      dl(a["browser_download_url"], "il2cppdumper.zip")
+                      if zipfile.is_zipfile("il2cppdumper.zip"):
+                          with zipfile.ZipFile("il2cppdumper.zip", "r") as z:
+                              z.extractall("il2cppdumper")
+                          print("Extracted Il2CppDumper:", a["name"])
+                          break
+          except Exception as e:
+              print("Il2CppDumper optional fetch warning:", e)
+          '
 
       - name: Reassemble Cached APK from Repo Release & Fetch Gist
         env:
@@ -77,7 +101,12 @@ jobs:
                           f.write(z.read(n))
           '
           if [ -f "dump_in/libil2cpp.so" ] && [ -f "dump_in/global-metadata.dat" ]; then
-            ./il2cppdumper/Il2CppDumper dump_in/libil2cpp.so dump_in/global-metadata.dat dump_out/ || true
+            if [ -f "il2cppdumper/Il2CppDumper.dll" ]; then
+              dotnet il2cppdumper/Il2CppDumper.dll dump_in/libil2cpp.so dump_in/global-metadata.dat dump_out/ || true
+            elif [ -f "il2cppdumper/Il2CppDumper" ]; then
+              chmod +x il2cppdumper/Il2CppDumper
+              ./il2cppdumper/Il2CppDumper dump_in/libil2cpp.so dump_in/global-metadata.dat dump_out/ || true
+            fi
           fi
           python3 analyze_dump.py
 
@@ -90,7 +119,6 @@ jobs:
           name: TempleRun-FreeCam-Mod
           path: |
             TempleRun_FreeCam_Mod.apk
-            dump_out/dump.cs
             generated_offsets.h
           retention-days: 7
 
