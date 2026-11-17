@@ -1,0 +1,121 @@
+name: Build Temple Run FreeCam Mod
+
+on:
+  workflow_dispatch:
+    inputs:
+      gist_id:
+        description: 'Gist ID'
+        required: true
+        type: string
+
+jobs:
+  mod_apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python & Tools
+        run: |
+          pip install requests cloudscraper
+          curl -sL https://github.com/REAndroid/APKEditor/releases/download/V1.4.1/APKEditor-1.4.1.jar -o APKEditor.jar
+          curl -sL https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar -o baksmali.jar
+          curl -sL https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar -o smali.jar
+          curl -sL https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-linux-v6.7.46.zip -o il2cppdumper.zip
+          unzip -q il2cppdumper.zip -d il2cppdumper
+          chmod +x il2cppdumper/Il2CppDumper
+
+      - name: Reassemble Cached APK from Repo Release & Fetch Gist
+        env:
+          GIST_ID: ${{ github.event.inputs.gist_id }}
+          REPO_FULL: "loopsofoops/temple-run-factory"
+        run: |
+          python3 -c '
+          import os, requests, zipfile, subprocess
+          gist_id = os.environ["GIST_ID"]
+          r = requests.get(f"https://api.github.com/gists/{gist_id}").json()
+          for fn, data in r.get("files", {}).items():
+              with open(fn, "w") as f:
+                  f.write(data["content"])
+          print("Downloaded Gist files.")
+
+          repo = os.environ["REPO_FULL"]
+          rel = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/base-apk").json()
+          assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])}
+          part_names = sorted([k for k in assets.keys() if k.startswith("tr_part_") and k.endswith(".bin")])
+          if not part_names:
+              raise RuntimeError("No cached APK parts found in release!")
+
+          with open("raw_download.bin", "wb") as out_f:
+              for pname in part_names:
+                  print(f"Downloading {pname}...")
+                  pr = requests.get(assets[pname], timeout=120)
+                  out_f.write(pr.content)
+
+          print(f"Reassembled raw_download.bin ({os.path.getsize("raw_download.bin")//(1024*1024)} MB)")
+
+          with zipfile.ZipFile("raw_download.bin", "r") as z:
+              names = z.namelist()
+          if "base.apk" in names:
+              print("Detected Split APKM/XAPK bundle! Merging with APKEditor...")
+              subprocess.check_call("java -jar APKEditor.jar m -i raw_download.bin -o target.apk", shell=True)
+          else:
+              os.rename("raw_download.bin", "target.apk")
+          '
+
+      - name: Run Il2CppDumper & Generate Offsets Header
+        run: |
+          mkdir -p dump_in dump_out
+          python3 -c '
+          import zipfile
+          with zipfile.ZipFile("target.apk", "r") as z:
+              for n in z.namelist():
+                  if n.endswith("libil2cpp.so"):
+                      with open("dump_in/libil2cpp.so", "wb") as f:
+                          f.write(z.read(n))
+                  elif n.endswith("global-metadata.dat"):
+                      with open("dump_in/global-metadata.dat", "wb") as f:
+                          f.write(z.read(n))
+          '
+          if [ -f "dump_in/libil2cpp.so" ] && [ -f "dump_in/global-metadata.dat" ]; then
+            ./il2cppdumper/Il2CppDumper dump_in/libil2cpp.so dump_in/global-metadata.dat dump_out/ || true
+          fi
+          python3 analyze_dump.py
+
+      - name: Compile C++ Hook, Inject Smali Overlay & Sign APK
+        run: python3 patch_apk.py
+
+      - name: Upload Modded APK & Recon Dump to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TempleRun-FreeCam-Mod
+          path: |
+            TempleRun_FreeCam_Mod.apk
+            dump_out/dump.cs
+            generated_offsets.h
+          retention-days: 7
+
+      - name: Upload Modded APK to Cloud Hosts
+        run: |
+          FINAL_APK="TempleRun_FreeCam_Mod.apk"
+          echo "### 🎮 Download Temple Run Free-Cam & Isometric Mod" >> $GITHUB_STEP_SUMMARY
+
+          log_upload() {
+            local service="$1"
+            local url="$2"
+            if [[ -n "$url" && "$url" =~ ^https?:// ]]; then
+              echo "✅ $service: $url"
+              echo "- **$service:** [$url]($url)" >> $GITHUB_STEP_SUMMARY
+            fi
+          }
+
+          URL_LITTER=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "time=72h" -F "fileToUpload=@$FINAL_APK" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null || true)
+          log_upload "Litterbox (Direct)" "$URL_LITTER"
+
+          URL_CATBOX=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "fileToUpload=@$FINAL_APK" https://catbox.moe/user/api.php 2>/dev/null || true)
+          log_upload "Catbox.moe" "$URL_CATBOX"
+
+          URL_TEMP=$(curl -s -A "Mozilla/5.0" -F "file=@$FINAL_APK" https://temp.sh/upload 2>/dev/null || true)
+          log_upload "Temp.sh" "$URL_TEMP"
+
+          URL_PIXEL=$(curl -s -A "Mozilla/5.0" -X PUT -T "$FINAL_APK" "https://pixeldrain.com/api/file/$FINAL_APK" 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print('https://pixeldrain.com/u/' + d['id']) if d.get('success') else ''" 2>/dev/null || true)
+          log_upload "Pixeldrain" "$URL_PIXEL"
