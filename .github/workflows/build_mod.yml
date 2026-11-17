@@ -48,7 +48,7 @@ jobs:
               print("Il2CppDumper optional fetch warning:", e)
           '
 
-      - name: Reassemble Cached APK from Repo Release & Merge Splits
+      - name: Reassemble Cached APK & Cleanly Merge Split Without Corrupting Assets
         env:
           GIST_ID: ${{ github.event.inputs.gist_id }}
           REPO_FULL: "loopsofoops/temple-run-factory"
@@ -75,16 +75,34 @@ jobs:
                   pr = requests.get(assets[pname], timeout=120)
                   out_f.write(pr.content)
 
-          print(f"Reassembled raw_download.bin ({os.path.getsize("raw_download.bin")//(1024*1024)} MB)")
-
           with zipfile.ZipFile("raw_download.bin", "r") as z:
               names = z.namelist()
-          if "base.apk" in names:
-              print("Detected Split APKM bundle! Merging quietly with APKEditor...")
-              subprocess.check_call("java -jar APKEditor.jar m -i raw_download.bin -o target.apk > apkeditor.log 2>&1", shell=True)
-              print("Merged target.apk successfully!")
-          else:
-              os.rename("raw_download.bin", "target.apk")
+              if "base.apk" in names:
+                  print("Extracting base.apk and split_config.arm64_v8a.apk...")
+                  z.extract("base.apk", "split_in")
+                  for n in names:
+                      if "arm64" in n and n.endswith(".apk"):
+                          z.extract(n, "split_in")
+                  subprocess.check_call("java -jar APKEditor.jar m -i raw_download.bin -o apkeditor_merged.apk > apkeditor.log 2>&1", shell=True)
+                  with zipfile.ZipFile("apkeditor_merged.apk", "r") as zm:
+                      clean_manifest = zm.read("AndroidManifest.xml")
+
+                  # Build target.apk keeping base.apk exact original classes*.dex and assets/* untouched!
+                  with zipfile.ZipFile("split_in/base.apk", "r") as zb, zipfile.ZipFile("target.apk", "w") as zt:
+                      for item in zb.infolist():
+                          if item.filename == "AndroidManifest.xml":
+                              zt.writestr(item, clean_manifest, compress_type=item.compress_type)
+                          else:
+                              zt.writestr(item, zb.read(item.filename), compress_type=item.compress_type)
+                      for n in names:
+                          if "arm64" in n and n.endswith(".apk"):
+                              with zipfile.ZipFile(f"split_in/{n}", "r") as zs:
+                                  for sitem in zs.infolist():
+                                      if sitem.filename.startswith("lib/") and sitem.filename.endswith(".so"):
+                                          zt.writestr(sitem, zs.read(sitem.filename), compress_type=zipfile.ZIP_STORED)
+                  print(f"Cleanly built target.apk ({os.path.getsize("target.apk")//(1024*1024)} MB) preserving all original DEX and assets!")
+              else:
+                  os.rename("raw_download.bin", "target.apk")
           '
 
       - name: Run Il2CppDumper (--roll-forward Major) & Inspect Real Signatures
@@ -111,14 +129,13 @@ jobs:
       - name: Compile C++ Hook, Inject Smali Overlay & Sign APK
         run: python3 patch_apk.py
 
-      - name: Upload Modded APK & Recon Dump to GitHub Artifacts
+      - name: Upload Modded APK to GitHub Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: TempleRun-FreeCam-Mod
           path: |
             TempleRun_FreeCam_Mod.apk
             generated_offsets.h
-            dump_out/dump.cs
           retention-days: 7
 
       - name: Upload Modded APK to Cloud Hosts
