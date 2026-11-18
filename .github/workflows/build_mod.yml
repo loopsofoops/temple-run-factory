@@ -48,31 +48,30 @@ jobs:
               print("Il2CppDumper optional fetch warning:", e)
           '
 
-      - name: Reassemble Cached APK & Cleanly Merge Split Without Corrupting Assets
+      - name: Reassemble Cached APK & Cleanly Merge Split
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GIST_ID: ${{ github.event.inputs.gist_id }}
           REPO_FULL: "loopsofoops/temple-run-factory"
         run: |
           python3 -c '
           import os, requests, zipfile, subprocess
+          headers = {"Authorization": f"token {os.environ.get("GH_TOKEN", "")}"}
           gist_id = os.environ["GIST_ID"]
-          r = requests.get(f"https://api.github.com/gists/{gist_id}").json()
+          r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers).json()
           for fn, data in r.get("files", {}).items():
               with open(fn, "w") as f:
                   f.write(data["content"])
           print("Downloaded Gist files.")
 
           repo = os.environ["REPO_FULL"]
-          rel = requests.get(f"https://api.github.com/repos/{repo}/releases/tags/base-apk").json()
-          assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])}
-          part_names = sorted([k for k in assets.keys() if k.startswith("tr_part_") and k.endswith(".bin")])
-          if not part_names:
-              raise RuntimeError("No cached APK parts found in release!")
-
           with open("raw_download.bin", "wb") as out_f:
-              for pname in part_names:
+              for idx in range(9):
+                  pname = f"tr_part_{idx:02d}.bin"
+                  url = f"https://github.com/{repo}/releases/download/base-apk/{pname}"
                   print(f"Downloading {pname}...")
-                  pr = requests.get(assets[pname], timeout=120)
+                  pr = requests.get(url, allow_redirects=True, timeout=120)
+                  pr.raise_for_status()
                   out_f.write(pr.content)
 
           with zipfile.ZipFile("raw_download.bin", "r") as z:
@@ -87,7 +86,6 @@ jobs:
                   with zipfile.ZipFile("apkeditor_merged.apk", "r") as zm:
                       clean_manifest = zm.read("AndroidManifest.xml")
 
-                  # Build target.apk keeping base.apk exact original classes*.dex and assets/* untouched!
                   with zipfile.ZipFile("split_in/base.apk", "r") as zb, zipfile.ZipFile("target.apk", "w") as zt:
                       for item in zb.infolist():
                           if item.filename == "AndroidManifest.xml":
@@ -100,7 +98,7 @@ jobs:
                                   for sitem in zs.infolist():
                                       if sitem.filename.startswith("lib/") and sitem.filename.endswith(".so"):
                                           zt.writestr(sitem, zs.read(sitem.filename), compress_type=zipfile.ZIP_STORED)
-                  print(f"Cleanly built target.apk ({os.path.getsize("target.apk")//(1024*1024)} MB) preserving all original DEX and assets!")
+                  print(f"Cleanly built target.apk ({os.path.getsize("target.apk")//(1024*1024)} MB)!")
               else:
                   os.rename("raw_download.bin", "target.apk")
           '
@@ -126,7 +124,7 @@ jobs:
           fi
           python3 analyze_dump.py
 
-      - name: Compile C++ Hook, Inject Smali Overlay & Sign APK
+      - name: Compile C++ Hook (-static-libstdc++), Inject Smali & Sign APK
         run: python3 patch_apk.py
 
       - name: Upload Modded APK to GitHub Artifacts
