@@ -1,0 +1,165 @@
+name: Build Temple Run FreeCam Mod
+
+on:
+  workflow_dispatch:
+    inputs:
+      gist_id:
+        description: 'Gist ID'
+        required: true
+        type: string
+
+jobs:
+  mod_apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Modding & Recon Tools Safely
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 -c '
+          import os, requests, zipfile
+
+          headers = {"Authorization": f"token {os.environ.get("GH_TOKEN", "")}"}
+
+          def dl(url, out):
+              print(f"Downloading {out}...")
+              r = requests.get(url, allow_redirects=True, timeout=60)
+              r.raise_for_status()
+              with open(out, "wb") as f:
+                  f.write(r.content)
+
+          dl("https://github.com/REAndroid/APKEditor/releases/download/V1.4.1/APKEditor-1.4.1.jar", "APKEditor.jar")
+          dl("https://bitbucket.org/JesusFreke/smali/downloads/baksmali-2.5.2.jar", "baksmali.jar")
+          dl("https://bitbucket.org/JesusFreke/smali/downloads/smali-2.5.2.jar", "smali.jar")
+
+          try:
+              rel = requests.get("https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest", headers=headers, timeout=30).json()
+              for a in rel.get("assets", []):
+                  if a["name"].endswith(".zip") and ("net6" in a["name"] or "v" in a["name"]):
+                      dl(a["browser_download_url"], "il2cppdumper.zip")
+                      if zipfile.is_zipfile("il2cppdumper.zip"):
+                          with zipfile.ZipFile("il2cppdumper.zip", "r") as z:
+                              z.extractall("il2cppdumper")
+                          print("Extracted Il2CppDumper:", a["name"])
+                          break
+          except Exception as e:
+              print("Il2CppDumper optional fetch warning:", e)
+          '
+
+      - name: Reassemble Cached APK & Fetch Gist via Raw CDN
+        env:
+          GIST_ID: ${{ github.event.inputs.gist_id }}
+          GIST_USER: "loopsofoops"
+          REPO_FULL: "loopsofoops/temple-run-factory"
+        run: |
+          python3 -c '
+          import os, requests, zipfile, subprocess
+          gist_id = os.environ["GIST_ID"]
+          user = os.environ["GIST_USER"]
+          for fn in ("analyze_dump.py", "trmod.cpp", "FreeCamOverlay.java", "patch_apk.py"):
+              raw_url = f"https://gist.githubusercontent.com/{user}/{gist_id}/raw/{fn}"
+              r = requests.get(raw_url, timeout=60)
+              r.raise_for_status()
+              with open(fn, "w") as f:
+                  f.write(r.text)
+          print("Downloaded Gist files via raw CDN.")
+
+          repo = os.environ["REPO_FULL"]
+          with open("raw_download.bin", "wb") as out_f:
+              for idx in range(9):
+                  pname = f"tr_part_{idx:02d}.bin"
+                  url = f"https://github.com/{repo}/releases/download/base-apk/{pname}"
+                  print(f"Downloading {pname}...")
+                  pr = requests.get(url, allow_redirects=True, timeout=120)
+                  pr.raise_for_status()
+                  out_f.write(pr.content)
+
+          with zipfile.ZipFile("raw_download.bin", "r") as z:
+              names = z.namelist()
+              if "base.apk" in names:
+                  print("Extracting base.apk and split_config.arm64_v8a.apk...")
+                  z.extract("base.apk", "split_in")
+                  for n in names:
+                      if "arm64" in n and n.endswith(".apk"):
+                          z.extract(n, "split_in")
+                  subprocess.check_call("java -jar APKEditor.jar m -i raw_download.bin -o apkeditor_merged.apk > apkeditor.log 2>&1", shell=True)
+                  with zipfile.ZipFile("apkeditor_merged.apk", "r") as zm:
+                      clean_manifest = zm.read("AndroidManifest.xml")
+
+                  with zipfile.ZipFile("split_in/base.apk", "r") as zb, zipfile.ZipFile("target.apk", "w") as zt:
+                      for item in zb.infolist():
+                          if item.filename == "AndroidManifest.xml":
+                              zt.writestr(item, clean_manifest, compress_type=item.compress_type)
+                          else:
+                              zt.writestr(item, zb.read(item.filename), compress_type=item.compress_type)
+                      for n in names:
+                          if "arm64" in n and n.endswith(".apk"):
+                              with zipfile.ZipFile(f"split_in/{n}", "r") as zs:
+                                  for sitem in zs.infolist():
+                                      if sitem.filename.startswith("lib/") and sitem.filename.endswith(".so"):
+                                          zt.writestr(sitem, zs.read(sitem.filename), compress_type=zipfile.ZIP_STORED)
+                  print(f"Cleanly built target.apk ({os.path.getsize("target.apk")//(1024*1024)} MB)!")
+              else:
+                  os.rename("raw_download.bin", "target.apk")
+          '
+
+      - name: Run Il2CppDumper (--roll-forward Major) & Inspect Real Signatures
+        run: |
+          mkdir -p dump_in dump_out
+          python3 -c '
+          import zipfile
+          with zipfile.ZipFile("target.apk", "r") as z:
+              for n in z.namelist():
+                  if n.endswith("libil2cpp.so"):
+                      with open("dump_in/libil2cpp.so", "wb") as f:
+                          f.write(z.read(n))
+                  elif n.endswith("global-metadata.dat"):
+                      with open("dump_in/global-metadata.dat", "wb") as f:
+                          f.write(z.read(n))
+          '
+          if [ -f "dump_in/libil2cpp.so" ] && [ -f "dump_in/global-metadata.dat" ]; then
+            if [ -f "il2cppdumper/Il2CppDumper.dll" ]; then
+              DOTNET_ROLL_FORWARD=Major dotnet il2cppdumper/Il2CppDumper.dll dump_in/libil2cpp.so dump_in/global-metadata.dat dump_out/ < /dev/null || true
+            fi
+          fi
+          python3 analyze_dump.py
+
+      - name: Compile C++ Hook (-static-libstdc++), Inject Smali & Sign APK
+        run: python3 patch_apk.py
+
+      - name: Upload Modded APK to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TempleRun-FreeCam-Mod
+          path: |
+            TempleRun_FreeCam_Mod.apk
+            generated_offsets.h
+          retention-days: 7
+
+      - name: Upload Modded APK to Cloud Hosts
+        run: |
+          FINAL_APK="TempleRun_FreeCam_Mod.apk"
+          echo "### 🎮 Download Temple Run Free-Cam & Isometric Mod" >> $GITHUB_STEP_SUMMARY
+
+          log_upload() {
+            local service="$1"
+            local url="$2"
+            if [[ -n "$url" && "$url" =~ ^https?:// ]]; then
+              echo "✅ DOWNLOAD_LINK [$service]: $url"
+              echo "- **$service:** [$url]($url)" >> $GITHUB_STEP_SUMMARY
+            fi
+          }
+
+          URL_LITTER=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "time=72h" -F "fileToUpload=@$FINAL_APK" https://litterbox.catbox.moe/resources/internals/api.php 2>/dev/null || true)
+          log_upload "Litterbox" "$URL_LITTER"
+
+          URL_CATBOX=$(curl -s -A "Mozilla/5.0" -F "reqtype=fileupload" -F "fileToUpload=@$FINAL_APK" https://catbox.moe/user/api.php 2>/dev/null || true)
+          log_upload "Catbox" "$URL_CATBOX"
+
+          URL_TEMP=$(curl -s -A "Mozilla/5.0" -F "file=@$FINAL_APK" https://temp.sh/upload 2>/dev/null || true)
+          log_upload "Temp.sh" "$URL_TEMP"
+
+          URL_PIXEL=$(curl -s -A "Mozilla/5.0" -X PUT -T "$FINAL_APK" "https://pixeldrain.com/api/file/$FINAL_APK" 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print('https://pixeldrain.com/u/' + d['id']) if d.get('success') else ''" 2>/dev/null || true)
+          log_upload "Pixeldrain" "$URL_PIXEL"
