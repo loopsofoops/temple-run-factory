@@ -48,21 +48,23 @@ jobs:
               print("Il2CppDumper optional fetch warning:", e)
           '
 
-      - name: Reassemble Cached APK & Cleanly Merge Split
+      - name: Reassemble Cached APK & Fetch Gist via Raw CDN
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GIST_ID: ${{ github.event.inputs.gist_id }}
+          GIST_USER: "loopsofoops"
           REPO_FULL: "loopsofoops/temple-run-factory"
         run: |
           python3 -c '
           import os, requests, zipfile, subprocess
-          headers = {"Authorization": f"token {os.environ.get("GH_TOKEN", "")}"}
           gist_id = os.environ["GIST_ID"]
-          r = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers).json()
-          for fn, data in r.get("files", {}).items():
+          user = os.environ["GIST_USER"]
+          for fn in ("analyze_dump.py", "trmod.cpp", "FreeCamOverlay.java", "patch_apk.py"):
+              raw_url = f"https://gist.githubusercontent.com/{user}/{gist_id}/raw/{fn}"
+              r = requests.get(raw_url, timeout=60)
+              r.raise_for_status()
               with open(fn, "w") as f:
-                  f.write(data["content"])
-          print("Downloaded Gist files.")
+                  f.write(r.text)
+          print("Downloaded Gist files via raw CDN.")
 
           repo = os.environ["REPO_FULL"]
           with open("raw_download.bin", "wb") as out_f:
